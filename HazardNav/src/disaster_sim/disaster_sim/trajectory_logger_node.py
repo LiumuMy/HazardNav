@@ -48,7 +48,7 @@ import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile
 
-from std_msgs.msg import Float32
+from std_msgs.msg import Float32, Bool
 from nav_msgs.msg import Odometry
 from geometry_msgs.msg import PointStamped
 
@@ -91,6 +91,9 @@ class TrajectoryLoggerNode(Node):
         self.declare_parameter('fallback_source_y', 4.0)
         self.declare_parameter('arrival_sample_threshold', 350.0)
 
+        self._recording = False
+        self._user_output_dir = str(self.get_parameter('output_dir').value).strip()
+
         out = str(self.get_parameter('output_csv').value).strip()
         out_dir = str(self.get_parameter('output_dir').value).strip()
         self.output_csv = out if out else _default_csv_path(out_dir)
@@ -117,6 +120,8 @@ class TrajectoryLoggerNode(Node):
             Float32, '/hazard/sample', self._sample_cb, qos)
         self.sub_src = self.create_subscription(
             PointStamped, '/hazard/source_gt', self._src_cb, qos)
+        self.sub_record_toggle = self.create_subscription(
+            Bool, '/hazard/record_toggle', self._record_toggle_cb, QoSProfile(depth=2))
 
         self._open_csv()
         self.timer = self.create_timer(self.period_sec, self._tick)
@@ -149,10 +154,27 @@ class TrajectoryLoggerNode(Node):
     def _src_cb(self, msg: PointStamped) -> None:
         self._source_gt = (float(msg.point.x), float(msg.point.y))
 
+    def _record_toggle_cb(self, msg: Bool) -> None:
+        """响应 GUI 的录制开关：开启/关闭 CSV 记录."""
+        self._recording = msg.data
+        if self._recording:
+            self._start_time = time.time()
+            self._row_count = 0
+            # 重新以新时间戳生成文件名
+            self.output_csv = _default_csv_path(self._user_output_dir)
+            self._open_csv()
+            self.get_logger().info(f'[RECORDING START] {self.output_csv}')
+        else:
+            self.close()
+            self.get_logger().info(f'[RECORDING STOPPED] {self.output_csv} ({self._row_count} rows)')
+
     def _current_source(self) -> Tuple[float, float]:
         return self._source_gt if self._source_gt is not None else self.fallback_src
 
     def _tick(self) -> None:
+        # 未开启录制时不写数据（但继续接收消息）
+        if not self._recording:
+            return
         if self._robot_xy is None:
             return
         rx, ry = self._robot_xy
